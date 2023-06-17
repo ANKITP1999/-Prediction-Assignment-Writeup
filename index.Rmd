@@ -1,0 +1,206 @@
+---
+title: "Practical Machine Learning Project"
+date: "2023-06-09"
+output: html_document
+---
+
+```{r include = FALSE, message = FALSE, warning = FALSE}
+library(caret)
+library(readr)
+library(tidyverse)
+library(randomForest)
+```
+
+
+The data used in this project was originally collected with the goal of determining if it is possible to predict whether a particular exercise is being done correctly.  Six men between the ages of 20 and 28 with little weightlifting experience were asked to perform repetitions of dumbbell bicep curls in five different ways (corresponding to the variable `classe` in the dataset).  The value `classe = A` corresponds to the correct way to do the exercise, while values B, C, D, and E represent common mistakes that occur while doing the exercise.
+
+```{r read-data, echo = FALSE}
+pml_training <- read.csv("C:/Users/eklada/Documents/Coursera-MachineLearning/FinalProject/pml-training.csv")
+
+pml_testing <- read.csv("C:/Users/eklada/Documents/Coursera-MachineLearning/FinalProject/pml-testing.csv")
+```
+
+After reading in the provided `pml_training` dataset, I split it into training and test sets.   The training set initially contained 160 variables.  After exploring these variables in the training set through summary tables and visualizations, I noticed that a large number of the columns contain summary statistics, all of which have a high proportion of missing values or `#DIV/0!` errors.  Rather than impute for missing values, I chose to drop these summary statistic columns and only use the raw sensor variables to fit a model.  After removing the summary statistics columns, the new training set contained 60 features.
+
+```{r}
+#Split pml_training into training and test sets:
+set.seed(3478)
+inTrain <- createDataPartition(y = pml_training$classe, p = 0.7, list = FALSE)
+training <- pml_training[inTrain,]
+testing <- pml_training[-inTrain,]
+```
+
+
+
+```{r include = FALSE}
+
+#check to see how many NA values in each column:
+colSums(is.na(training))
+
+#remove columns with any NA values (all columns removed have almost all NA or missing values)
+training <- training %>%
+  select(!starts_with(c("kurtosis_", "skewness_", "max_", "min_",
+                        "amplitude_", "var_", "avg_", "stddev_")))
+```
+
+After further exploration, I noticed that each male participant (identified by the `user_name` variable) seems to be associated with a particular time stamp value.  As a result, I decided to remove the three time stamp variables (`raw_timestamp_part_1`, `raw_timestamp_part_2`, and `cvtd_timestamp`), as well as the identifier `user_name`, leaving 56 features.
+
+
+```{r echo = FALSE}
+#Visualization to explore the time stamp variables
+#qplot(classe, raw_timestamp_part_1, color = user_name, data = training)
+
+#it appears timestamp variables and name are not good predictors:
+training <- training %>%
+  select(!c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "user_name"))
+
+```
+
+Finally, I explored the window features.  Most of the observations have `new_window = no`, as seen in the bar chart below.  Also, `num_window` appears to be some sort of index variable for the raw measurements.  I decided to eliminate both window variables since they do not appear to be good predictors of `classe`, and I also eliminated the first column `X` since it appears to be an index variable, leaving a total of 53 features. 
+
+```{r echo = FALSE}
+#Explore the window variables:
+ggplot(training, aes(x = classe, fill = new_window)) + geom_bar()
+
+#ggplot(training, aes(x = classe, y = num_window)) + geom_point()
+```
+
+```{r echo = FALSE}
+#remove other variables that are not measurements:
+training <- training %>%
+  select(!c("X", "new_window", "num_window"))
+```
+
+Before fitting a model to predict the `classe` variable, I next generated a bar chart to inspect the distribution of the `classe` variable.  Class A has slightly more observations than the other categories, but the number of observations across the categories is fairly similar otherwise.
+
+```{r plot-response, echo = FALSE}
+
+ggplot(training, aes(x = classe)) +
+  geom_bar(color = "lightblue", fill = "lightblue") +
+  labs(title = "Distribution of the different exercise categories")
+```
+
+
+I also generated a series of feature plots to explore the other potential predictors in the dataset and their relationship to `classe`.  One of these plots is shown below.  Other plots have been suppressed to adhere to the visualization limit for this project.  Overall, I did not see any imbalances in the number of observations across groups for the remaining predictor variables.  I also did not see any noticeable outliers.
+
+```{r eval = FALSE, echo = FALSE}
+qplot(classe, roll_belt, data = training)
+```
+```{r eval= FALSE, echo = FALSE}
+qplot(classe, pitch_belt, data = training)
+```
+```{r eval = FALSE, echo = FALSE}
+qplot(classe, yaw_belt, data = training)
+```
+```{r eval = FALSE, echo = FALSE}
+qplot(classe, total_accel_belt, data = training)
+```
+```{r eval = FALSE, echo = FALSE}
+#Include these predictors in the model:
+qplot(classe, gyros_belt_x, data = training)
+qplot(classe, gyros_belt_y, data = training)
+qplot(classe, gyros_belt_z, data = training)
+```
+```{r eval = FALSE, echo = FALSE}
+qplot(classe, accel_belt_x, data = training)
+```
+
+```{r eval = FALSE, echo = FALSE}
+qplot(classe, magnet_belt_x, data = training)
+qplot(classe, magnet_belt_y, data = training)
+qplot(classe, magnet_belt_z, data = training)
+```
+
+
+```{r echo = FALSE}
+ggplot(training, aes(x = classe, y = roll_arm)) +
+  geom_boxplot() +
+  labs(title = "Distribution of roll_arm by classe")
+
+#ggplot(training, aes(x = classe, y = pitch_arm)) +
+#  geom_boxplot() +
+#  labs(title = "Distribution of pitch_arm by class")
+```
+
+
+```{r eval = FALSE, echo = FALSE}
+#total_accel_belt has an interesting bimodal distribution
+ggplot(training, aes(x = total_accel_belt), ) +
+  geom_histogram()
+
+#ggplot(training, aes(x = total_accel_belt, y = user_name)) + geom_boxplot()
+
+#ggplot(training, aes(x = total_accel_belt, color = user_name, fill = user_name)) + geom_density()
+
+ggplot(training, aes(x = total_accel_belt, y = gyros_belt_x)) + geom_point()
+```
+
+
+I decided to first train a random forest model to predict `classe`.  I chose a random forest since they tend to have good predictive performance with relatively little hyperparameter tuning.  For the first model, I used the defaults in the `train()` method from the `caret` package, which means the default resampling method used was the bootstrap.  The model code took an extremely long time to run, however.  In an attempt to improve run time, I decided to train a random forest model again, but this time using 10-fold cross-validation for model tuning. In practice, choosing k = 10 appears to be a good choice for bias-variance trade-off. This method will also give an estimate of the out-of-sample error since for a random forest the out-of-bag (OOB) error estimate is equivalent to the out-of-sample error estimate calculated using other approaches.  However, I think it is beneficial to estimate the out-of-sample error using data that was not used to calculate the model parameters.  So I used an additional holdout set to make predictions and calculate the out-of-sample error estimate. 
+
+Looking at the variable importance plot below, we see that the variables with the largest mean decrease in Gini index are `roll_belt`, `pitch_forearm`, and `yaw_belt`.  
+
+
+
+```{r eval = FALSE, echo = FALSE}
+#Random forest model with defaults: extremely long run time
+mod_rf <- train(classe ~ ., data = training, method = "rf")
+mod_rf
+```
+
+
+
+```{r}
+#Random forest model using 10-fold cross-validation
+#This model runs considerably faster than using the default bootstrap)
+mod_rf_cv <- train(classe ~ ., data = training, method = "rf",
+                trControl = trainControl(method = "cv", number = 10))
+
+mod_rf_cv
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+plot(mod_rf_cv, main = "Accuracy by Predictor Count")
+varImpPlot(mod_rf_cv$finalModel, main= "Variable Importance Plot:  Random Forest")
+```
+
+The code below uses a holdout set to estimate the out-of-sample error.  The expected out-of- sample error for this model was 0.009 and it took considerably less run time to train.  Since the accuracy for this model is already at 99.1%, I decided not to tune the model any further (again, one of the benefits of random forests is their out-of-box performance).
+
+```{r}
+#select features for the testing set:
+testing <- testing %>%
+  select(!starts_with(c("kurtosis_", "skewness_", "max_", "min_",
+                        "amplitude_", "var_", "avg_", "stddev_")))
+
+testing <- testing %>%
+  select(!c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "user_name", "X", "new_window", "num_window"))
+
+pred <- predict(mod_rf_cv, testing)
+
+#Estimate of the out of sample error = 1 - accuracy:
+testing$classe <- as.factor(testing$classe)
+confusionMatrix(pred, testing$classe)
+sum(pred != testing$classe)/length(testing$classe)
+```
+
+```{r eval = FALSE, echo = FALSE}
+#Remove unnecessary features from testing (validation) dataset:
+pml_testing <- pml_testing %>%
+  select(!starts_with(c("kurtosis_", "skewness_", "max_", "min_",
+                        "amplitude_", "var_", "avg_", "stddev_")))
+pml_testing <- pml_testing %>%
+  select(!c("raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "X", "user_name", "new_window", "num_window"))
+
+```
+
+```{r eval = FALSE, echo = FALSE}
+#Generate predictions for validation set (final quiz requirement):
+pred_valid <- predict(mod_rf_cv, pml_testing)
+
+```
+
+
+
+
+
+
